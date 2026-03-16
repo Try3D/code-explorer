@@ -1,0 +1,30 @@
+[project]
+name = "code-explorer"
+dynamic = ["version"]
+description = "MCP server that answers questions about Git repos using claude/opencode CLI"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.1.0",
+    "gitpython>=3.1.0",
+    "jsonc-parser==1.1.5",
+]
+
+[dependency-groups]
+dev = [
+    "twine>=6.0.0",
+    "build>=1.0.0",
+]
+
+[project.scripts]
+cexp = "cli:main"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+sources = ["."]
+include = ["*.py"]
