@@ -2,9 +2,14 @@ import json
 import subprocess
 from pathlib import Path
 
+from config import setup_logging
+
+log = setup_logging().getChild("runner")
+
 
 def run_claude(query: str, cwd: Path, config: dict) -> str:
     """Spawn `claude -p <query>` in the repo directory and return the answer."""
+    log.info("spawning claude (model=%s, max_turns=%s) in %s", config["model"], config["max_turns"], cwd)
     cmd = [
         "claude",
         "-p", _wrap_query(query, cwd),
@@ -27,15 +32,18 @@ def run_claude(query: str, cwd: Path, config: dict) -> str:
             "Install it with: npm install -g @anthropic-ai/claude-code"
         )
     except subprocess.TimeoutExpired:
+        log.error("claude timed out after 300s in %s", cwd)
         raise RuntimeError("claude agent timed out after 300 seconds")
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
+        log.error("claude exited %s: %s", result.returncode, stderr)
         raise RuntimeError(
             f"claude exited with status {result.returncode}"
             + (f": {stderr}" if stderr else "")
         )
 
+    log.info("claude completed successfully")
     return result.stdout.strip()
 
 
@@ -56,6 +64,7 @@ def run_opencode(query: str, cwd: Path, config: dict) -> str:
     # opencode uses provider/model format; if already qualified leave it, else prefix anthropic/
     if "/" not in model:
         model = f"anthropic/{model}"
+    log.info("spawning opencode (model=%s) in %s", model, cwd)
 
     cmd = [
         "opencode", "run", _wrap_query(query, cwd),
@@ -76,16 +85,18 @@ def run_opencode(query: str, cwd: Path, config: dict) -> str:
             "Install it from: https://opencode.ai"
         )
     except subprocess.TimeoutExpired:
+        log.error("opencode timed out after 300s in %s", cwd)
         raise RuntimeError("opencode agent timed out after 300 seconds")
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
+        log.error("opencode exited %s: %s", result.returncode, stderr)
         raise RuntimeError(
             f"opencode exited with status {result.returncode}"
             + (f": {stderr}" if stderr else "")
         )
 
-    # opencode --format json outputs newline-delimited JSON events; extract the last text result
+    log.info("opencode completed successfully")
     answer = _extract_opencode_answer(result.stdout)
     return answer
 

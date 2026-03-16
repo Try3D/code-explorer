@@ -5,6 +5,7 @@ import config as cfg_module
 import repo_manager
 
 mcp = FastMCP("code_explorer_mcp")
+log = cfg_module.setup_logging().getChild("server")
 
 
 @mcp.tool()
@@ -33,6 +34,7 @@ def code_explorer_query(repo_url: str, query: str, branch: str | None = None) ->
         branch: The branch that was analyzed.
         cli_used: Which CLI backend was used ("claude" or "opencode").
     """
+    log.info("tool called: repo=%s branch=%s query=%r", repo_url, branch, query)
     config = cfg_module.load_config()
     cfg_module.ensure_cache_dir(config)
 
@@ -41,6 +43,7 @@ def code_explorer_query(repo_url: str, query: str, branch: str | None = None) ->
         resolved_branch = repo_manager.ensure_repo(owner, repo, local_path, clone_url, branch)
         answer = cli_runner.run_query(query, local_path, config)
     except (ValueError, RuntimeError) as e:
+        log.error("tool error: %s", e)
         return {"error": str(e)}
 
     return {

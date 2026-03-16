@@ -1,3 +1,5 @@
+import logging
+import logging.handlers
 from pathlib import Path
 
 from jsonc_parser.parser import JsoncParser
@@ -31,3 +33,21 @@ def get_repos_dir(config: dict) -> Path:
 
 def ensure_cache_dir(config: dict) -> None:
     get_repos_dir(config).mkdir(parents=True, exist_ok=True)
+
+
+def setup_logging() -> logging.Logger:
+    """Configure file logging to ~/.code-explorer/code-explorer.log."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = CACHE_DIR / "code-explorer.log"
+
+    logger = logging.getLogger("code_explorer")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.DEBUG)
+    handler = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+    return logger

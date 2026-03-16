@@ -3,7 +3,9 @@ from pathlib import Path
 
 import git
 
-from config import get_repos_dir, load_config
+from config import get_repos_dir, load_config, setup_logging
+
+log = setup_logging().getChild("repo")
 
 
 def parse_git_url(url: str) -> tuple[str, str, Path, str]:
@@ -63,17 +65,21 @@ def ensure_repo(owner: str, repo: str, local_path: Path, clone_url: str, branch:
         clone_kwargs: dict = {"depth": 1}
         if branch:
             clone_kwargs["branch"] = branch
+        log.info("cloning %s (branch=%s) -> %s", clone_url, branch or "default", local_path)
         try:
             repo_obj = git.Repo.clone_from(clone_url, str(local_path), **clone_kwargs)
         except git.GitCommandError as e:
+            log.error("clone failed for %s: %s", clone_url, e)
             raise RuntimeError(
                 f"Repository not found or inaccessible: {clone_url}\n{e}"
             ) from e
     else:
+        log.info("fetching updates for %s/%s", owner, repo)
         repo_obj = git.Repo(str(local_path))
         try:
             repo_obj.remotes.origin.fetch()
         except git.GitCommandError as e:
+            log.error("fetch failed for %s/%s: %s", owner, repo, e)
             raise RuntimeError(f"Failed to fetch updates: {e}") from e
 
         if branch:
@@ -82,6 +88,7 @@ def ensure_repo(owner: str, repo: str, local_path: Path, clone_url: str, branch:
             _pull_ff(repo_obj)
 
     active_branch = _get_current_branch(repo_obj)
+    log.info("ready: %s/%s @ %s", owner, repo, active_branch)
     return active_branch
 
 
