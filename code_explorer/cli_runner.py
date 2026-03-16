@@ -2,7 +2,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from config import setup_logging
+from .config import setup_logging
 
 log = setup_logging().getChild("runner")
 

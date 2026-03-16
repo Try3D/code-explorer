@@ -13,10 +13,12 @@ dependencies = [
 dev = [
     "twine>=6.0.0",
     "build>=1.0.0",
+    "pytest>=8.0.0",
+    "pytest-mock>=3.12.0",
 ]
 
 [project.scripts]
-cexp = "cli:main"
+cexp = "code_explorer.cli:main"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
@@ -26,5 +28,7 @@ build-backend = "hatchling.build"
 source = "vcs"
 
 [tool.hatch.build.targets.wheel]
-sources = ["."]
-include = ["*.py"]
+packages = ["code_explorer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

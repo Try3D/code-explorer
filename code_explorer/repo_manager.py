@@ -1,9 +1,10 @@
 import re
+import shutil
 from pathlib import Path
 
 import git
 
-from config import get_repos_dir, load_config, setup_logging
+from .config import get_repos_dir, load_config, setup_logging
 
 log = setup_logging().getChild("repo")
 
@@ -111,7 +112,6 @@ def _pull_ff(repo_obj: git.Repo) -> None:
         # Non-fast-forward: re-clone to recover cleanly
         local_path = Path(repo_obj.working_dir)
         repo_obj.close()
-        import shutil
         shutil.rmtree(str(local_path))
         raise RuntimeError(
             f"Pull failed (non-fast-forward). Removed local cache at {local_path}. "

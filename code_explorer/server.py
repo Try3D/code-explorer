@@ -1,8 +1,8 @@
 from mcp.server.fastmcp import FastMCP
 
-import cli_runner
-import config as cfg_module
-import repo_manager
+from . import cli_runner
+from . import config as cfg_module
+from . import repo_manager
 
 mcp = FastMCP("code_explorer_mcp")
 log = cfg_module.setup_logging().getChild("server")

@@ -14,9 +14,9 @@ Examples:
 import argparse
 import sys
 
-import cli_runner
-import config as cfg_module
-import repo_manager
+from . import cli_runner
+from . import config as cfg_module
+from . import repo_manager
 
 
 def main() -> None:
