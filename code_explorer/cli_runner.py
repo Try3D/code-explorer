@@ -7,16 +7,19 @@ from .config import setup_logging
 log = setup_logging().getChild("runner")
 
 
-def run_claude(query: str, cwd: Path, config: dict) -> str:
-    """Spawn `claude -p <query>` in the repo directory and return the answer."""
-    log.info("spawning claude (model=%s, max_turns=%s) in %s", config["model"], config["max_turns"], cwd)
-    cmd = [
-        "claude",
+def run_claude(query: str, cwd: Path, config: dict, session_id: str | None = None) -> tuple[str, str]:
+    """Spawn `claude -p <query>` in the repo directory and return (answer, session_id)."""
+    log.info("spawning claude (model=%s, max_turns=%s, resume=%s) in %s",
+             config["model"], config["max_turns"], bool(session_id), cwd)
+    cmd = ["claude"]
+    if session_id:
+        cmd += ["-r", session_id]
+    cmd += [
         "-p", _wrap_query(query, cwd),
         "--model", config["model"],
         "--allowedTools", ",".join(config["allowed_tools"]),
         "--max-turns", str(config["max_turns"]),
-        "--output-format", "text",
+        "--output-format", "json",
     ]
     try:
         result = subprocess.run(
@@ -44,7 +47,23 @@ def run_claude(query: str, cwd: Path, config: dict) -> str:
         )
 
     log.info("claude completed successfully")
-    return result.stdout.strip()
+    return _extract_claude_answer(result.stdout)
+
+
+def _extract_claude_answer(output: str) -> tuple[str, str]:
+    """Parse claude's JSON output and return (answer_text, session_id).
+
+    claude --output-format json emits a single JSON object like:
+      {"type": "result", "subtype": "success", "result": "...", "session_id": "...", ...}
+    """
+    try:
+        data = json.loads(output.strip())
+        answer = data.get("result", "").strip()
+        sid = data.get("session_id", "")
+        return answer, sid
+    except (json.JSONDecodeError, AttributeError):
+        # Fallback: return raw output with empty session_id
+        return output.strip(), ""
 
 
 def _wrap_query(query: str, cwd: Path) -> str:
@@ -147,13 +166,13 @@ def _extract_opencode_answer(output: str) -> str:
     return output.strip()
 
 
-def run_query(query: str, cwd: Path, config: dict) -> str:
-    """Dispatch to the configured CLI backend."""
+def run_query(query: str, cwd: Path, config: dict, session_id: str | None = None) -> tuple[str, str | None]:
+    """Dispatch to the configured CLI backend. Returns (answer, session_id_or_None)."""
     cli = config.get("cli", "claude")
     if cli == "opencode":
-        return run_opencode(query, cwd, config)
+        return run_opencode(query, cwd, config), None
     elif cli == "claude":
-        return run_claude(query, cwd, config)
+        return run_claude(query, cwd, config, session_id=session_id)
     else:
         raise ValueError(
             f"Unknown CLI backend {cli!r} in config. Must be 'claude' or 'opencode'."

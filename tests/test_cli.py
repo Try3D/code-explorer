@@ -14,13 +14,23 @@ from code_explorer.cli import main
 
 
 @pytest.fixture
-def mock_deps(mocker, monkeypatch, tmp_path):
+def mock_store(mocker):
+    """Return a mock SessionStore instance injected into cli.SessionStore()."""
+    store = MagicMock()
+    store.get.return_value = None  # no existing session by default
+    mocker.patch("code_explorer.cli.SessionStore", return_value=store)
+    return store
+
+
+@pytest.fixture
+def mock_deps(mocker, monkeypatch, mock_store, tmp_path):
     """Mock all external dependencies so main() runs in isolation."""
     # Isolate config loading
     monkeypatch.setattr("code_explorer.config.CONFIG_PATH", tmp_path / "nope.jsonc")
     monkeypatch.setattr("code_explorer.config.CONFIG_PATH_JSON", tmp_path / "nope.json")
 
     mocks = {
+        "store": mock_store,
         "ensure_cache_dir": mocker.patch("code_explorer.cli.cfg_module.ensure_cache_dir"),
         "parse_git_url": mocker.patch(
             "code_explorer.cli.repo_manager.parse_git_url",
@@ -32,7 +42,7 @@ def mock_deps(mocker, monkeypatch, tmp_path):
         ),
         "run_query": mocker.patch(
             "code_explorer.cli.cli_runner.run_query",
-            return_value="The answer is 42.",
+            return_value=("The answer is 42.", "sid-mock"),
         ),
     }
     return mocks
@@ -149,3 +159,69 @@ class TestCliErrorHandling:
         monkeypatch.setattr(sys, "argv", ["cexp"])
         with pytest.raises(SystemExit, match="2"):
             main()
+
+
+class TestCliSessionBehavior:
+    def test_new_session_prints_new(self, mock_deps, monkeypatch, capsys):
+        mock_deps["store"].get.return_value = None
+        monkeypatch.setattr(sys, "argv", ["cexp", "https://github.com/owner/repo", "q"])
+        main()
+        assert "session: new" in capsys.readouterr().out
+
+    def test_resumed_session_prints_session_id(self, mock_deps, monkeypatch, capsys):
+        mock_deps["store"].get.return_value = "abc-123"
+        monkeypatch.setattr(sys, "argv", ["cexp", "https://github.com/owner/repo", "q"])
+        main()
+        assert "session: resuming abc-123" in capsys.readouterr().out
+
+    def test_session_id_passed_to_run_query_when_resuming(self, mock_deps, monkeypatch):
+        mock_deps["store"].get.return_value = "abc-123"
+        monkeypatch.setattr(sys, "argv", ["cexp", "https://github.com/owner/repo", "q"])
+        main()
+        assert mock_deps["run_query"].call_args[1]["session_id"] == "abc-123"
+
+    def test_no_session_id_passed_to_run_query_when_new(self, mock_deps, monkeypatch):
+        mock_deps["store"].get.return_value = None
+        monkeypatch.setattr(sys, "argv", ["cexp", "https://github.com/owner/repo", "q"])
+        main()
+        assert mock_deps["run_query"].call_args[1]["session_id"] is None
+
+    def test_session_saved_after_success(self, mock_deps, monkeypatch):
+        mock_deps["run_query"].return_value = ("answer", "new-sid-456")
+        monkeypatch.setattr(sys, "argv", ["cexp", "https://github.com/owner/repo", "q"])
+        main()
+        mock_deps["store"].save.assert_called_once_with("owner/repo@main", "new-sid-456")
+
+    def test_session_not_saved_when_session_id_empty(self, mock_deps, monkeypatch):
+        mock_deps["run_query"].return_value = ("answer", "")
+        monkeypatch.setattr(sys, "argv", ["cexp", "https://github.com/owner/repo", "q"])
+        main()
+        mock_deps["store"].save.assert_not_called()
+
+    def test_session_key_uses_owner_repo_branch(self, mock_deps, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["cexp", "https://github.com/owner/repo", "q"])
+        main()
+        mock_deps["store"].get.assert_called_once_with("owner/repo@main")
+
+    def test_stale_session_cleared_and_retried_on_failure(self, mock_deps, monkeypatch, capsys):
+        mock_deps["store"].get.return_value = "stale-sid"
+        mock_deps["run_query"].side_effect = [
+            RuntimeError("session not found"),
+            ("fresh answer", "new-sid"),
+        ]
+        monkeypatch.setattr(sys, "argv", ["cexp", "https://github.com/owner/repo", "q"])
+        main()
+        mock_deps["store"].clear.assert_called_once_with("owner/repo@main")
+        assert mock_deps["run_query"].call_count == 2
+        # second call has no session_id
+        assert mock_deps["run_query"].call_args_list[1][1].get("session_id") is None
+
+    def test_stale_session_retry_saves_new_session(self, mock_deps, monkeypatch):
+        mock_deps["store"].get.return_value = "stale-sid"
+        mock_deps["run_query"].side_effect = [
+            RuntimeError("expired"),
+            ("answer", "brand-new-sid"),
+        ]
+        monkeypatch.setattr(sys, "argv", ["cexp", "https://github.com/owner/repo", "q"])
+        main()
+        mock_deps["store"].save.assert_called_once_with("owner/repo@main", "brand-new-sid")

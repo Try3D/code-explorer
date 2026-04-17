@@ -5,6 +5,7 @@ error handling, and integration with internal modules — all mocked.
 """
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,7 +18,12 @@ def mock_deps(mocker, monkeypatch, tmp_path):
     monkeypatch.setattr("code_explorer.config.CONFIG_PATH", tmp_path / "nope.jsonc")
     monkeypatch.setattr("code_explorer.config.CONFIG_PATH_JSON", tmp_path / "nope.json")
 
+    store = MagicMock()
+    store.get.return_value = None
+    mocker.patch("code_explorer.server._session_store", store)
+
     mocks = {
+        "store": store,
         "ensure_cache_dir": mocker.patch("code_explorer.server.cfg_module.ensure_cache_dir"),
         "parse_git_url": mocker.patch(
             "code_explorer.server.repo_manager.parse_git_url",
@@ -29,7 +35,7 @@ def mock_deps(mocker, monkeypatch, tmp_path):
         ),
         "run_query": mocker.patch(
             "code_explorer.server.cli_runner.run_query",
-            return_value="The answer.",
+            return_value=("The answer.", "sid-mock"),
         ),
     }
     return mocks
@@ -99,3 +105,68 @@ class TestErrorResponse:
         mock_deps["parse_git_url"].side_effect = ValueError("bad")
         result = code_explorer_query("bad", "q")
         assert isinstance(result, dict)
+
+
+class TestServerSessionBehavior:
+    def test_session_id_in_response(self, mock_deps):
+        mock_deps["run_query"].return_value = ("answer", "sid-xyz")
+        result = code_explorer_query("https://github.com/owner/repo", "q")
+        assert result["session_id"] == "sid-xyz"
+
+    def test_session_id_none_when_empty_string(self, mock_deps):
+        mock_deps["run_query"].return_value = ("answer", "")
+        result = code_explorer_query("https://github.com/owner/repo", "q")
+        assert result["session_id"] is None
+
+    def test_session_looked_up_before_run_query(self, mock_deps):
+        mock_deps["store"].get.return_value = "prior-sid"
+        code_explorer_query("https://github.com/owner/repo", "q")
+        mock_deps["store"].get.assert_called_once_with("owner/repo@main")
+        assert mock_deps["run_query"].call_args[1]["session_id"] == "prior-sid"
+
+    def test_no_prior_session_passes_none(self, mock_deps):
+        mock_deps["store"].get.return_value = None
+        code_explorer_query("https://github.com/owner/repo", "q")
+        assert mock_deps["run_query"].call_args[1]["session_id"] is None
+
+    def test_session_saved_after_success(self, mock_deps):
+        mock_deps["run_query"].return_value = ("answer", "new-sid-789")
+        code_explorer_query("https://github.com/owner/repo", "q")
+        mock_deps["store"].save.assert_called_once_with("owner/repo@main", "new-sid-789")
+
+    def test_session_not_saved_when_empty(self, mock_deps):
+        mock_deps["run_query"].return_value = ("answer", "")
+        code_explorer_query("https://github.com/owner/repo", "q")
+        mock_deps["store"].save.assert_not_called()
+
+    def test_stale_session_cleared_and_retried(self, mock_deps):
+        mock_deps["store"].get.return_value = "stale-sid"
+        mock_deps["run_query"].side_effect = [
+            RuntimeError("session expired"),
+            ("fresh answer", "new-sid"),
+        ]
+        result = code_explorer_query("https://github.com/owner/repo", "q")
+        mock_deps["store"].clear.assert_called_once_with("owner/repo@main")
+        assert mock_deps["run_query"].call_count == 2
+        assert result["answer"] == "fresh answer"
+
+    def test_stale_session_retry_passes_no_session_id(self, mock_deps):
+        mock_deps["store"].get.return_value = "stale-sid"
+        mock_deps["run_query"].side_effect = [
+            RuntimeError("expired"),
+            ("answer", "new-sid"),
+        ]
+        code_explorer_query("https://github.com/owner/repo", "q")
+        # second call must not pass the old session_id
+        second_call_kwargs = mock_deps["run_query"].call_args_list[1][1]
+        assert second_call_kwargs.get("session_id") is None
+
+    def test_stale_session_second_failure_returns_error(self, mock_deps):
+        mock_deps["store"].get.return_value = "stale-sid"
+        mock_deps["run_query"].side_effect = [
+            RuntimeError("session expired"),
+            RuntimeError("agent crashed"),
+        ]
+        result = code_explorer_query("https://github.com/owner/repo", "q")
+        assert "error" in result
+        assert "agent crashed" in result["error"]

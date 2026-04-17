@@ -1,9 +1,10 @@
 """Tests for code_explorer.cli_runner.
 
-Three testable surfaces:
+Four testable surfaces:
 1. _wrap_query — pure string formatting
 2. _extract_opencode_answer — pure NDJSON parsing
-3. run_claude / run_opencode / run_query — subprocess orchestration (mocked)
+3. _extract_claude_answer — pure JSON parsing
+4. run_claude / run_opencode / run_query — subprocess orchestration (mocked)
 """
 
 import json
@@ -14,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from code_explorer.cli_runner import (
+    _extract_claude_answer,
     _extract_opencode_answer,
     _wrap_query,
     run_claude,
@@ -33,6 +35,11 @@ def _make_successful_result(stdout: str = "answer") -> MagicMock:
     mock.stdout = stdout
     mock.stderr = ""
     return mock
+
+
+def _make_claude_success(text: str = "answer", session_id: str = "sid123") -> MagicMock:
+    payload = json.dumps({"type": "result", "subtype": "success", "result": text, "session_id": session_id})
+    return _make_successful_result(payload)
 
 
 def _make_opencode_success(text: str = "ok") -> MagicMock:
@@ -311,32 +318,38 @@ class TestExtractOpencodeRealisticStreams:
 
 class TestRunQueryDispatch:
     def test_dispatches_to_claude(self, mocker):
-        mock = mocker.patch("code_explorer.cli_runner.run_claude", return_value="answer")
+        mock = mocker.patch("code_explorer.cli_runner.run_claude", return_value=("answer", "sid"))
         result = run_query("q", Path("/r"), {"cli": "claude"})
-        mock.assert_called_once_with("q", Path("/r"), {"cli": "claude"})
-        assert result == "answer"
+        mock.assert_called_once_with("q", Path("/r"), {"cli": "claude"}, session_id=None)
+        assert result == ("answer", "sid")
 
     def test_dispatches_to_opencode(self, mocker):
         mock = mocker.patch("code_explorer.cli_runner.run_opencode", return_value="answer")
-        result = run_query("q", Path("/r"), {"cli": "opencode"})
+        answer, sid = run_query("q", Path("/r"), {"cli": "opencode"})
         mock.assert_called_once()
-        assert result == "answer"
+        assert answer == "answer"
+        assert sid is None
 
     def test_unknown_cli_raises_value_error(self):
         with pytest.raises(ValueError, match="Unknown CLI backend"):
             run_query("q", Path("/r"), {"cli": "unknown"})
 
     def test_defaults_to_claude_when_cli_key_missing(self, mocker):
-        mock = mocker.patch("code_explorer.cli_runner.run_claude", return_value="answer")
+        mock = mocker.patch("code_explorer.cli_runner.run_claude", return_value=("answer", "sid"))
         run_query("q", Path("/r"), {})
         mock.assert_called_once()
 
     def test_passes_full_config_to_backend(self, mocker):
         config = {"cli": "claude", "model": "sonnet", "extra": True}
-        mock = mocker.patch("code_explorer.cli_runner.run_claude", return_value="a")
+        mock = mocker.patch("code_explorer.cli_runner.run_claude", return_value=("a", "sid"))
         run_query("q", Path("/r"), config)
         _, _, passed_config = mock.call_args[0]
         assert passed_config is config
+
+    def test_passes_session_id_to_claude(self, mocker):
+        mock = mocker.patch("code_explorer.cli_runner.run_claude", return_value=("answer", "new_sid"))
+        run_query("q", Path("/r"), {"cli": "claude"}, session_id="old_sid")
+        mock.assert_called_once_with("q", Path("/r"), {"cli": "claude"}, session_id="old_sid")
 
 
 # ===========================================================================
@@ -345,13 +358,14 @@ class TestRunQueryDispatch:
 
 
 class TestRunClaude:
-    def test_success_returns_stripped_stdout(self, mocker):
-        mocker.patch("subprocess.run", return_value=_make_successful_result("  answer  \n"))
-        result = run_claude("q", Path("/r"), dict(DEFAULTS))
-        assert result == "answer"
+    def test_success_returns_answer_and_session_id(self, mocker):
+        mocker.patch("subprocess.run", return_value=_make_claude_success("answer", "sid123"))
+        answer, sid = run_claude("q", Path("/r"), dict(DEFAULTS))
+        assert answer == "answer"
+        assert sid == "sid123"
 
     def test_builds_correct_command(self, mocker):
-        mock_run = mocker.patch("subprocess.run", return_value=_make_successful_result())
+        mock_run = mocker.patch("subprocess.run", return_value=_make_claude_success())
         config = {**DEFAULTS, "model": "sonnet", "max_turns": 10, "allowed_tools": ["Bash", "Read"]}
         run_claude("my question", Path("/repo"), config)
 
@@ -368,9 +382,25 @@ class TestRunClaude:
         idx = cmd.index("--allowedTools")
         assert cmd[idx + 1] == "Bash,Read"
         assert "--output-format" in cmd
+        idx = cmd.index("--output-format")
+        assert cmd[idx + 1] == "json"
+
+    def test_no_session_id_no_r_flag(self, mocker):
+        mock_run = mocker.patch("subprocess.run", return_value=_make_claude_success())
+        run_claude("q", Path("/r"), dict(DEFAULTS))
+        cmd = mock_run.call_args[0][0]
+        assert "-r" not in cmd
+
+    def test_with_session_id_adds_r_flag(self, mocker):
+        mock_run = mocker.patch("subprocess.run", return_value=_make_claude_success())
+        run_claude("q", Path("/r"), dict(DEFAULTS), session_id="abc123")
+        cmd = mock_run.call_args[0][0]
+        assert "-r" in cmd
+        idx = cmd.index("-r")
+        assert cmd[idx + 1] == "abc123"
 
     def test_passes_cwd_to_subprocess(self, mocker):
-        mock_run = mocker.patch("subprocess.run", return_value=_make_successful_result())
+        mock_run = mocker.patch("subprocess.run", return_value=_make_claude_success())
         run_claude("q", Path("/my/repo"), dict(DEFAULTS))
         kwargs = mock_run.call_args[1]
         assert kwargs["cwd"] == "/my/repo"
@@ -414,21 +444,53 @@ class TestRunClaude:
         mocker.patch("subprocess.run", return_value=mock)
         with pytest.raises(RuntimeError, match="status 1") as exc_info:
             run_claude("q", Path("/r"), dict(DEFAULTS))
-        # Should not have a trailing colon when no stderr
         assert str(exc_info.value).endswith("status 1")
 
     def test_sets_timeout(self, mocker):
-        mock_run = mocker.patch("subprocess.run", return_value=_make_successful_result())
+        mock_run = mocker.patch("subprocess.run", return_value=_make_claude_success())
         run_claude("q", Path("/r"), dict(DEFAULTS))
         kwargs = mock_run.call_args[1]
         assert kwargs["timeout"] == 300
 
     def test_captures_output(self, mocker):
-        mock_run = mocker.patch("subprocess.run", return_value=_make_successful_result())
+        mock_run = mocker.patch("subprocess.run", return_value=_make_claude_success())
         run_claude("q", Path("/r"), dict(DEFAULTS))
         kwargs = mock_run.call_args[1]
         assert kwargs["capture_output"] is True
         assert kwargs["text"] is True
+
+
+# ===========================================================================
+# _extract_claude_answer — JSON parsing
+# ===========================================================================
+
+
+class TestExtractClaudeAnswer:
+    def test_parses_result_and_session_id(self):
+        output = json.dumps({"type": "result", "subtype": "success", "result": "Hello", "session_id": "sid1"})
+        answer, sid = _extract_claude_answer(output)
+        assert answer == "Hello"
+        assert sid == "sid1"
+
+    def test_strips_whitespace_from_result(self):
+        output = json.dumps({"result": "  trimmed  ", "session_id": "s"})
+        answer, _ = _extract_claude_answer(output)
+        assert answer == "trimmed"
+
+    def test_empty_session_id_when_missing(self):
+        output = json.dumps({"result": "answer"})
+        _, sid = _extract_claude_answer(output)
+        assert sid == ""
+
+    def test_fallback_on_invalid_json(self):
+        answer, sid = _extract_claude_answer("not json")
+        assert answer == "not json"
+        assert sid == ""
+
+    def test_fallback_on_empty_output(self):
+        answer, sid = _extract_claude_answer("")
+        assert answer == ""
+        assert sid == ""
 
 
 # ===========================================================================

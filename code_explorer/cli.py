@@ -11,12 +11,12 @@ Examples:
   python cli.py git@github.com:fastapi/fastapi.git "What is the dependency injection system?" --cli claude --model sonnet
 """
 
-import argparse
 import sys
 
 from . import cli_runner
 from . import config as cfg_module
 from . import repo_manager
+from .session_store import SessionStore
 
 
 def main() -> None:
@@ -81,13 +81,37 @@ def main() -> None:
 
     print(f"[cex] branch: {resolved_branch}")
     print(f"[cex] local:  {local_path}")
+
+    session_store = SessionStore()
+    session_key = f"{owner}/{repo}@{resolved_branch}"
+    existing_session = session_store.get(session_key)
+    if existing_session:
+        print(f"[cex] session: resuming {existing_session}")
+    else:
+        print("[cex] session: new")
     print(f"[cex] running agent ...\n")
 
     try:
-        answer = cli_runner.run_query(args.query, local_path, config)
+        answer, new_session_id = cli_runner.run_query(
+            args.query, local_path, config, session_id=existing_session
+        )
     except RuntimeError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        if existing_session:
+            print(f"[cex] session stale, retrying fresh ...\n", file=sys.stderr)
+            session_store.clear(session_key)
+            try:
+                answer, new_session_id = cli_runner.run_query(
+                    args.query, local_path, config
+                )
+            except RuntimeError as e2:
+                print(f"Error: {e2}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    if new_session_id:
+        session_store.save(session_key, new_session_id)
 
     print(answer)
 
